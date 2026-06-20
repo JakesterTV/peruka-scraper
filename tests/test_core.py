@@ -4,10 +4,11 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import URLError
 
 from peruka_scraper.core import (
     HttpClient,
-    ProductFamily,
+    InlineVariant,
     ProductRecord,
     VariantLink,
     build_families,
@@ -24,12 +25,16 @@ class FakeClient(HttpClient):
         self.responses = responses
 
     def get_text(self, url: str) -> str:
+        if url not in self.responses:
+            raise URLError(f"Missing fixture for {url}")
         response = self.responses[url]
         if isinstance(response, bytes):
             return response.decode("utf-8")
         return response
 
     def get_bytes(self, url: str) -> bytes:
+        if url not in self.responses:
+            raise URLError(f"Missing fixture for {url}")
         response = self.responses[url]
         if isinstance(response, bytes):
             return response
@@ -57,6 +62,15 @@ PRODUCT_ONE = """
           "availability": "https://schema.org/InStock"
         }
       }
+    </script>
+    <script>
+      var product = {
+        "gauges": [{"name": "Kolor"}],
+        "stocks": [
+          {"stock_id": 1, "code": "UMA-S-6-8-BLONDE", "gvalue1": "Blonde", "price": "1999.00", "stock": 5},
+          {"stock_id": 2, "code": "UMA-S-6-8-BRUNETTE", "gvalue1": "Brunette", "price": "1999.00", "stock": 3}
+        ]
+      };
     </script>
   </head>
   <body>
@@ -117,6 +131,7 @@ class CoreTests(unittest.TestCase):
                 ("https://shop.example.com/uma-s-6-8-brunette.html", "Brunette"),
             ],
         )
+        self.assertEqual([variant.label for variant in product.inline_variants], ["Blonde", "Brunette"])
 
     def test_discover_product_urls_follows_sitemap_index(self) -> None:
         client = FakeClient(
@@ -159,6 +174,7 @@ class CoreTests(unittest.TestCase):
                 categories=["Wigs"],
                 variant_links=[VariantLink("https://shop.example.com/uma-s-6-8-brunette.html", "Brunette")],
                 discovered_colors=["Blonde", "Brunette"],
+                inline_variants=[],
             ),
             ProductRecord(
                 url="https://shop.example.com/uma-s-6-8-brunette.html",
@@ -174,6 +190,7 @@ class CoreTests(unittest.TestCase):
                 categories=["Wigs"],
                 variant_links=[VariantLink("https://shop.example.com/uma-s-6-8-blonde.html", "Blonde")],
                 discovered_colors=["Brunette", "Blonde"],
+                inline_variants=[],
             ),
         ]
         families = build_families(records)
@@ -208,6 +225,32 @@ class CoreTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 3)
             self.assertEqual(rows[0]["Type"], "variable")
+
+    def test_inline_variants_generate_variation_rows_without_links(self) -> None:
+        record = ProductRecord(
+            url="https://shop.example.com/uma-s-6-8.html",
+            canonical_url="https://shop.example.com/uma-s-6-8.html",
+            title="UMA S 6/8",
+            short_description="Short",
+            description="Long",
+            sku="UMA-S-6-8",
+            price="1999.00",
+            currency="PLN",
+            availability="https://schema.org/InStock",
+            images=["https://cdn.example.com/base.jpg"],
+            categories=["Wigs"],
+            variant_links=[],
+            discovered_colors=["Blonde", "Brunette"],
+            inline_variants=[
+                InlineVariant("Blonde", "UMA-S-6-8-BLONDE", "1999.00", "instock", ["https://cdn.example.com/blonde.jpg"]),
+                InlineVariant("Brunette", "UMA-S-6-8-BRUNETTE", "2099.00", "instock", ["https://cdn.example.com/brunette.jpg"]),
+            ],
+        )
+        family = build_families([record])[0]
+        rows = generate_woocommerce_rows([family])
+        self.assertEqual([row["Type"] for row in rows], ["variable", "variation", "variation"])
+        self.assertEqual(rows[1]["Regular price"], "1999.00")
+        self.assertEqual(rows[2]["Images"], "https://cdn.example.com/brunette.jpg")
 
 
 if __name__ == "__main__":

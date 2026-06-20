@@ -1,2 +1,0 @@
-[console_scripts]
-peruka-scraper = peruka_scraper.cli:main

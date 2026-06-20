@@ -23,10 +23,14 @@ DEFAULT_SITEMAP_PATHS = (
     "/mapa-strony.xml",
     "/sitemap-products.xml",
     "/sitemap_products.xml",
+    "/sitemap_products_0.xml",
+    "/sitemap_products_1.xml",
+    "/sitemap.xml?type=products",
     "/server-sitemap.xml",
 )
 PRODUCT_URL_RE = re.compile(r"/[^/?#]+\.html(?:$|[?#])", re.IGNORECASE)
 VARIANT_TERMS = ("wybierz", "kolor", "color", "odcie", "wariant", "variant", "swatch")
+NON_PRODUCT_PATH_TERMS = ("blog", "aktualnosci", "news", "poradnik", "guide", "article")
 PRODUCT_TYPE_COLUMNS = (
     "ID",
     "Type",
@@ -61,6 +65,15 @@ class VariantLink:
 
 
 @dataclass(slots=True)
+class InlineVariant:
+    label: str
+    sku: str | None
+    price: str | None
+    availability: str | None
+    images: list[str]
+
+
+@dataclass(slots=True)
 class ProductRecord:
     url: str
     canonical_url: str
@@ -75,6 +88,7 @@ class ProductRecord:
     categories: list[str]
     variant_links: list[VariantLink]
     discovered_colors: list[str]
+    inline_variants: list[InlineVariant]
 
 
 @dataclass(slots=True)
@@ -163,6 +177,7 @@ def scrape_site(
                 for link in record.variant_links
             ],
             discovered_colors=record.discovered_colors,
+            inline_variants=record.inline_variants,
         )
         products[record.url] = record
         if canonical_url != record.url and canonical_url not in products:
@@ -278,13 +293,19 @@ def _walk_sitemap(
 def is_product_url(url: str, base_url: str) -> bool:
     parsed = urlparse(url)
     base_netloc = urlparse(base_url).netloc
-    return parsed.netloc == base_netloc and bool(PRODUCT_URL_RE.search(parsed.path))
+    path_terms = {part.casefold() for part in parsed.path.split("/") if part}
+    return (
+        parsed.netloc == base_netloc
+        and bool(PRODUCT_URL_RE.search(parsed.path))
+        and not path_terms.intersection(NON_PRODUCT_PATH_TERMS)
+    )
 
 
 def parse_product_html(url: str, html: str) -> ProductRecord:
     soup = BeautifulSoup(html, "html.parser")
     json_ld_objects = extract_json_ld_objects(soup)
     product_json = choose_product_object(json_ld_objects)
+    inline_product = extract_inline_product_data(html)
 
     title = (
         nested_json_value(product_json, "name")
@@ -315,8 +336,11 @@ def parse_product_html(url: str, html: str) -> ProductRecord:
     categories = dedupe_preserve_order(extract_categories(soup))
     offers = choose_offer(product_json)
     variant_links = extract_variant_links(soup, canonical_url)
+    inline_variants = extract_inline_variants(inline_product, soup, canonical_url)
     discovered_colors = dedupe_preserve_order(
-        [link.label for link in variant_links if link.label] + extract_select_colors(soup)
+        [link.label for link in variant_links if link.label]
+        + [variant.label for variant in inline_variants]
+        + extract_select_colors(soup)
     )
 
     return ProductRecord(
@@ -333,6 +357,7 @@ def parse_product_html(url: str, html: str) -> ProductRecord:
         categories=categories,
         variant_links=variant_links,
         discovered_colors=discovered_colors,
+        inline_variants=inline_variants,
     )
 
 
@@ -348,6 +373,24 @@ def extract_json_ld_objects(soup: BeautifulSoup) -> list[dict]:
             continue
         objects.extend(flatten_json_ld(payload))
     return objects
+
+
+def extract_inline_product_data(html: str) -> dict:
+    patterns = (
+        r"var\s+product\s*=\s*(\{.*?\})\s*;",
+        r"window\.product\s*=\s*(\{.*?\})\s*;",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.DOTALL)
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def flatten_json_ld(payload: object) -> list[dict]:
@@ -404,8 +447,7 @@ def extract_images_from_html(soup: BeautifulSoup, base_url: str) -> list[str]:
             value = element.get(attr)
             if not value:
                 continue
-            lower_value = value.lower()
-            if lower_value.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            if looks_like_image_url(value):
                 urls.append(urljoin(base_url, value))
     return urls
 
@@ -426,6 +468,37 @@ def extract_categories(soup: BeautifulSoup) -> list[str]:
     if len(categories) > 1:
         return [category for category in categories if category.lower() not in {"start", "home"}]
     return []
+
+
+def extract_inline_variants(product_data: dict, soup: BeautifulSoup, current_url: str) -> list[InlineVariant]:
+    if not isinstance(product_data, dict):
+        return []
+
+    color_positions = detect_color_positions(product_data)
+    stock_image_map = build_stock_image_map(soup, current_url)
+    variants: list[InlineVariant] = []
+    for stock in product_data.get("stocks", []) or []:
+        if not isinstance(stock, dict):
+            continue
+        label = extract_stock_color_label(stock, color_positions)
+        if not label:
+            continue
+        images = extract_stock_images(stock, stock_image_map)
+        variants.append(
+            InlineVariant(
+                label=label,
+                sku=stringify(stock.get("code") or stock.get("sku") or stock.get("stock_id")),
+                price=stringify(stock.get("price")),
+                availability="instock" if int_or_none(stock.get("stock") or stock.get("quantity")) not in {None, 0} else None,
+                images=images,
+            )
+        )
+    deduped: dict[str, InlineVariant] = {}
+    for variant in variants:
+        key = variant.label.casefold()
+        if key not in deduped:
+            deduped[key] = variant
+    return list(deduped.values())
 
 
 def extract_variant_links(soup: BeautifulSoup, current_url: str) -> list[VariantLink]:
@@ -457,6 +530,69 @@ def extract_variant_links(soup: BeautifulSoup, current_url: str) -> list[Variant
         VariantLink(url=url, label=label)
         for url, label in dedupe_variant_links(candidates).items()
     ]
+
+
+def detect_color_positions(product_data: dict) -> list[int]:
+    color_positions: list[int] = []
+    gauges = product_data.get("gauges", []) or []
+    for index, gauge in enumerate(gauges, start=1):
+        if not isinstance(gauge, dict):
+            continue
+        names = [
+            stringify(gauge.get("name")) or "",
+            stringify(nested_json_value(gauge.get("translations", {}).get("pl_PL", {}), "name")) or "",
+            stringify(gauge.get("label")) or "",
+        ]
+        if any(any(term in name.lower() for term in VARIANT_TERMS) for name in names if name):
+            color_positions.append(index)
+    return color_positions
+
+
+def build_stock_image_map(soup: BeautifulSoup, current_url: str) -> dict[str, list[str]]:
+    image_map: dict[str, list[str]] = {}
+    for element in soup.select("[data-stock-id]"):
+        stock_id = clean_text(element.get("data-stock-id", ""))
+        if not stock_id:
+            continue
+        urls = []
+        for value in (
+            element.get("data-image"),
+            element.get("data-src"),
+            element.get("src"),
+            element.get("href"),
+        ):
+            if not value:
+                continue
+            absolute_url = urljoin(current_url, value)
+            if looks_like_image_url(absolute_url):
+                urls.append(absolute_url)
+        if urls:
+            image_map[stock_id] = dedupe_preserve_order(urls)
+    return image_map
+
+
+def extract_stock_color_label(stock: dict, color_positions: list[int]) -> str:
+    for position in color_positions:
+        for key in (f"gvalue{position}", f"value{position}", f"option{position}"):
+            label = clean_text(stringify(stock.get(key)) or "")
+            if label:
+                return label
+    for key, value in stock.items():
+        if key.startswith(("gvalue", "value")) and clean_text(stringify(value) or ""):
+            return clean_text(stringify(value) or "")
+    return ""
+
+
+def extract_stock_images(stock: dict, stock_image_map: dict[str, list[str]]) -> list[str]:
+    image_candidates = [
+        stringify(stock.get("image")),
+        stringify(stock.get("photo")),
+        stringify(stock.get("icon")),
+    ]
+    stock_id = stringify(stock.get("stock_id"))
+    if stock_id and stock_id in stock_image_map:
+        image_candidates.extend(stock_image_map[stock_id])
+    return dedupe_preserve_order([image for image in image_candidates if image])
 
 
 def looks_like_variant_container(tag) -> bool:
@@ -624,8 +760,10 @@ def generate_woocommerce_rows(families: list[ProductFamily]) -> list[dict[str, s
     rows: list[dict[str, str]] = []
     for family in families:
         colors = dedupe_preserve_order(family.color_by_url[product.url] for product in family.products)
-        if len(family.products) > 1 or len(colors) > 1:
+        inline_variants = family.products[0].inline_variants if len(family.products) == 1 else []
+        if len(family.products) > 1 or len(colors) > 1 or len(inline_variants) > 1:
             parent_product = family.products[0]
+            attribute_values = colors or [variant.label for variant in inline_variants]
             rows.append(
                 make_row(
                     product_type="variable",
@@ -638,26 +776,45 @@ def generate_woocommerce_rows(families: list[ProductFamily]) -> list[dict[str, s
                     categories=family.categories,
                     images=parent_product.images,
                     parent="",
-                    attribute_value=", ".join(colors),
+                    attribute_value=", ".join(attribute_values),
                 )
             )
-            for product in family.products:
-                color = family.color_by_url[product.url]
-                rows.append(
-                    make_row(
-                        product_type="variation",
-                        sku=product.sku or f"{family.parent_sku}-{slugify(color)}",
-                        name="",
-                        short_description="",
-                        description="",
-                        in_stock=availability_to_stock(product.availability),
-                        regular_price=product.price or "",
-                        categories=[],
-                        images=product.images,
-                        parent=family.parent_sku,
-                        attribute_value=color,
+            if len(family.products) == 1 and len(inline_variants) > 1:
+                base_product = family.products[0]
+                for variant in inline_variants:
+                    rows.append(
+                        make_row(
+                            product_type="variation",
+                            sku=variant.sku or f"{family.parent_sku}-{slugify(variant.label)}",
+                            name="",
+                            short_description="",
+                            description="",
+                            in_stock=availability_to_stock(variant.availability or base_product.availability),
+                            regular_price=variant.price or base_product.price or "",
+                            categories=[],
+                            images=variant.images or base_product.images,
+                            parent=family.parent_sku,
+                            attribute_value=variant.label,
+                        )
                     )
-                )
+            else:
+                for product in family.products:
+                    color = family.color_by_url[product.url]
+                    rows.append(
+                        make_row(
+                            product_type="variation",
+                            sku=product.sku or f"{family.parent_sku}-{slugify(color)}",
+                            name="",
+                            short_description="",
+                            description="",
+                            in_stock=availability_to_stock(product.availability),
+                            regular_price=product.price or "",
+                            categories=[],
+                            images=product.images,
+                            parent=family.parent_sku,
+                            attribute_value=color,
+                        )
+                    )
         else:
             product = family.products[0]
             rows.append(
@@ -857,6 +1014,13 @@ def stringify(value) -> str | None:
     return str(value)
 
 
+def int_or_none(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def strip_html(value: str) -> str:
     if not value:
         return ""
@@ -871,6 +1035,10 @@ def clean_text(value: str) -> str:
 def availability_to_stock(value: str | None) -> str:
     normalized = (value or "").lower()
     return "1" if any(token in normalized for token in ("instock", "in stock", "available")) else "0"
+
+
+def looks_like_image_url(url: str) -> bool:
+    return url.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
 
 
 def slugify(value: str) -> str:
