@@ -489,7 +489,7 @@ def extract_inline_variants(product_data: dict, soup: BeautifulSoup, current_url
                 label=label,
                 sku=stringify(stock.get("code") or stock.get("sku") or stock.get("stock_id")),
                 price=stringify(stock.get("price")),
-                availability="instock" if int_or_none(stock.get("stock") or stock.get("quantity")) not in {None, 0} else None,
+                availability=stock_availability(stock),
                 images=images,
             )
         )
@@ -850,6 +850,8 @@ def make_row(
     attribute_value: str,
 ) -> dict[str, str]:
     row = {column: "" for column in PRODUCT_TYPE_COLUMNS}
+    attribute_name = "Color" if product_type != "simple" or attribute_value else ""
+    attribute_visible = attribute_visibility(product_type, attribute_value)
     row.update(
         {
             "Type": product_type,
@@ -866,9 +868,9 @@ def make_row(
             "Categories": ", ".join(categories),
             "Images": ", ".join(images),
             "Parent": parent,
-            "Attribute 1 name": "Color" if product_type != "simple" or attribute_value else "",
+            "Attribute 1 name": attribute_name,
             "Attribute 1 value(s)": attribute_value,
-            "Attribute 1 visible": "1" if product_type != "variation" and attribute_value else ("1" if product_type == "variation" else ""),
+            "Attribute 1 visible": attribute_visible,
             "Attribute 1 global": "1" if attribute_value else "",
         }
     )
@@ -1035,6 +1037,17 @@ def clean_text(value: str) -> str:
 def availability_to_stock(value: str | None) -> str:
     normalized = (value or "").lower()
     return "1" if any(token in normalized for token in ("instock", "in stock", "available")) else "0"
+
+
+def stock_availability(stock: dict) -> str | None:
+    quantity = int_or_none(stock.get("stock") or stock.get("quantity"))
+    return "instock" if quantity not in {None, 0} else None
+
+
+def attribute_visibility(product_type: str, attribute_value: str) -> str:
+    if product_type == "variation":
+        return "1"
+    return "1" if attribute_value else ""
 
 
 def looks_like_image_url(url: str) -> bool:

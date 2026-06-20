@@ -13,14 +13,14 @@ Scrapes Shoper-style product pages, groups color variants, and exports a WooComm
 ## Install
 
 ```bash
-cd /home/runner/work/peruka-scraper/peruka-scraper
+cd <project-directory>
 python -m pip install -e .
 ```
 
 ## Usage
 
 ```bash
-cd /home/runner/work/peruka-scraper/peruka-scraper
+cd <project-directory>
 python -m peruka_scraper.cli \
   --base-url https://www.peruka.pl \
   --seed-product-url https://www.peruka.pl/uma-s-6-8-peruka-naturalna.html \
@@ -30,9 +30,9 @@ python -m peruka_scraper.cli \
 
 ### Output
 
-- `/home/runner/work/peruka-scraper/peruka-scraper/output/products.csv`
-- `/home/runner/work/peruka-scraper/peruka-scraper/output/images/` when `--download-images` is enabled
-- `/home/runner/work/peruka-scraper/peruka-scraper/output/images.csv` image manifest when `--download-images` is enabled
+- `output/products.csv`
+- `output/images/` when `--download-images` is enabled
+- `output/images.csv` image manifest when `--download-images` is enabled
 
 ## Notes
 
@@ -43,6 +43,6 @@ python -m peruka_scraper.cli \
 ## Tests
 
 ```bash
-cd /home/runner/work/peruka-scraper/peruka-scraper
+cd <project-directory>
 python -m unittest discover -s tests -v
 ```
