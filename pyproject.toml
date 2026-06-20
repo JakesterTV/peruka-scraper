@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peruka-scraper"
+version = "0.1.0"
+description = "Scrape Shoper product variants and export WooCommerce CSV files."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4==4.15.0",
+]
+
+[project.scripts]
+peruka-scraper = "peruka_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["peruka_scraper*"]
